@@ -7,12 +7,12 @@ require shellfs
 
 # Confirm the extension works
 query I
-SELECT count(distinct column0) from read_csv('env python -c "print(''\n''.join([f''{i},{i}'' for i in range(100)]))" |')
+SELECT count(distinct column0) from read_csv('seq 0 99 | awk ''{print $1 "," $1}'' |')
 ----
 100
 
 query I
-SELECT count(distinct column0) from read_csv('env python -c "print(''\n''.join([f''{i},{i}'' for i in range(100)]))" | grep 2 |')
+SELECT count(distinct column0) from read_csv('seq 0 99 | awk ''{print $1 "," $1}'' | grep 2 |')
 ----
 19
 
