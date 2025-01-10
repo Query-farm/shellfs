@@ -5,7 +5,6 @@
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/limits.hpp"
 
-
 #ifndef _WIN32
 #include <dirent.h>
 #include <fcntl.h>
@@ -31,156 +30,179 @@
 
 #endif
 
+namespace duckdb
+{
 
-namespace duckdb {
-
-struct ShellFileHandle : public FileHandle {
-public:
-	ShellFileHandle(FileSystem &file_system, string path, FILE *pipe) : FileHandle(file_system, std::move(path)), pipe(pipe) {
-	}
-	~ShellFileHandle() override {
-		ShellFileHandle::Close();
-	}
-
-	FILE *pipe;
-
-public:
-	void Close() override {
-		if(!pipe) {
-			return;
+	struct ShellFileHandle : public FileHandle
+	{
+	public:
+		ShellFileHandle(FileSystem &file_system, string path, FILE *pipe, FileOpenFlags flags) : FileHandle(file_system, std::move(path), std::move(flags)), pipe(pipe)
+		{
+		}
+		~ShellFileHandle() override
+		{
+			ShellFileHandle::Close();
 		}
 
-		int result;
+		FILE *pipe;
 
-#ifndef _WIN32
-		result = pclose(pipe);
-#else
-		result = _pclose(pipe);
-#endif
-		// Indicate that the pipe has been closed.
-		pipe = NULL;
-
-		if(result == -1) {
-			throw IOException("Could not close pipe \"%s\": %s", {{"errno", std::to_string(errno)}}, path,
-												strerror(errno));
-		} else {
-#ifndef _WIN32
-			if(WIFEXITED(result)) {
-				int exit_status = WEXITSTATUS(result);
-				if (exit_status != 0) {
-					throw IOException("Pipe process exited with non-zero exit code=\"%d\": %s", exit_status, path);
-				} else if (WIFSIGNALED(result)) {
-					int signal_number = WTERMSIG(result);
-					throw IOException("Pipe process exited with signal signal=\"%d\": %s", signal_number, path);
-				} else if(exit_status != 0) {
-					throw IOException("Pipe process exited abnormally: %s", path);
-				}
+	public:
+		void Close() override
+		{
+			if (!pipe)
+			{
+				return;
 			}
+
+			int result;
+
+#ifndef _WIN32
+			result = pclose(pipe);
+#else
+			result = _pclose(pipe);
 #endif
-		}
+			// Indicate that the pipe has been closed.
+			pipe = NULL;
+
+			if (result == -1)
+			{
+				throw IOException("Could not close pipe \"%s\": %s", {{"errno", std::to_string(errno)}}, path,
+													strerror(errno));
+			}
+			else
+			{
+#ifndef _WIN32
+				if (WIFEXITED(result))
+				{
+					int exit_status = WEXITSTATUS(result);
+					if (exit_status != 0)
+					{
+						throw IOException("Pipe process exited with non-zero exit code=\"%d\": %s", exit_status, path);
+					}
+					else if (WIFSIGNALED(result))
+					{
+						int signal_number = WTERMSIG(result);
+						throw IOException("Pipe process exited with signal signal=\"%d\": %s", signal_number, path);
+					}
+					else if (exit_status != 0)
+					{
+						throw IOException("Pipe process exited abnormally: %s", path);
+					}
+				}
+#endif
+			}
+		};
 	};
-};
 
-void ShellFileSystem::Reset(FileHandle &handle) {
-	throw InternalException("Cannot reset shell file system");
-}
+	void ShellFileSystem::Reset(FileHandle &handle)
+	{
+		throw InternalException("Cannot reset shell file system");
+	}
 
+	int64_t ShellFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes)
+	{
+		FILE *pipe = handle.Cast<ShellFileHandle>().pipe;
 
-int64_t ShellFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes) {
-	FILE *pipe = handle.Cast<ShellFileHandle>().pipe;
+		if (!pipe)
+		{
+			return 0;
+		}
 
-	if (!pipe) {
+		int64_t bytes_read = fread(buffer, 1, nr_bytes, pipe);
+		if (bytes_read == -1)
+		{
+			throw IOException("Could not read from pipe \"%s\": %s", {{"errno", std::to_string(errno)}}, handle.path,
+												strerror(errno));
+		}
+		if (bytes_read == 0)
+		{
+			// Since the last read() returned 0 bytes, presume that EOF has been encountered, and rather than
+			// having the close, by doing this if there are errors with the pipe they are caught in the query
+			// rather than in the destructor.
+			handle.Close();
+		}
+		return bytes_read;
+	}
+
+	int64_t ShellFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes)
+	{
+		FILE *pipe = handle.Cast<ShellFileHandle>().pipe;
+		int64_t bytes_written = 0;
+
+		while (nr_bytes > 0)
+		{
+			auto bytes_to_write = MinValue<idx_t>(idx_t(NumericLimits<int32_t>::Maximum()), idx_t(nr_bytes));
+			int64_t current_bytes_written = fwrite(buffer, 1, bytes_to_write, pipe);
+			if (current_bytes_written <= 0)
+			{
+				throw IOException("Could not write to pipe \"%s\": %s", {{"errno", std::to_string(errno)}}, handle.path,
+													strerror(errno));
+			}
+			bytes_written += current_bytes_written;
+			buffer = (void *)(data_ptr_cast(buffer) + current_bytes_written);
+			nr_bytes -= current_bytes_written;
+		}
+
+		return bytes_written;
+	}
+
+	int64_t ShellFileSystem::GetFileSize(FileHandle &handle)
+	{
+		// You can't know the size of the data that will come over a pipe
+		// some code uses the size to allocate buffers, so don't return
+		// a very large number.
 		return 0;
 	}
 
-	int64_t bytes_read = fread(buffer, 1, nr_bytes, pipe);
-	if (bytes_read == -1)
+	unique_ptr<FileHandle> ShellFileSystem::OpenFile(const string &path, FileOpenFlags flags,
+																									 optional_ptr<FileOpener> opener)
 	{
-		throw IOException("Could not read from pipe \"%s\": %s", {{"errno", std::to_string(errno)}}, handle.path,
-		                  strerror(errno));
-	}
-	if (bytes_read == 0) {
-		// Since the last read() returned 0 bytes, presume that EOF has been encountered, and rather than
-		// having the close, by doing this if there are errors with the pipe they are caught in the query
-		// rather than in the destructor.
-		handle.Close();
-	}
-	return bytes_read;
-}
-
-
-int64_t ShellFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes) {
-	FILE *pipe = handle.Cast<ShellFileHandle>().pipe;
-	int64_t bytes_written = 0;
-
-	while (nr_bytes > 0)
-	{
-		auto bytes_to_write = MinValue<idx_t>(idx_t(NumericLimits<int32_t>::Maximum()), idx_t(nr_bytes));
-		int64_t current_bytes_written = fwrite(buffer, 1, bytes_to_write, pipe);
-		if (current_bytes_written <= 0) {
-			throw IOException("Could not write to pipe \"%s\": %s", {{"errno", std::to_string(errno)}}, handle.path,
-												strerror(errno));
+		FILE *pipe;
+		if (path.front() == '|')
+		{
+			// We want to write to the pipe.
+#ifndef _WIN32
+			pipe = popen(path.substr(1, path.size()).c_str(), "w");
+#else
+			pipe = _popen(path.substr(1, path.size()).c_str(), "w");
+#endif
 		}
-		bytes_written += current_bytes_written;
-		buffer = (void *)(data_ptr_cast(buffer) + current_bytes_written);
-		nr_bytes -= current_bytes_written;
-	}
-
-	return bytes_written;
-}
-
-int64_t ShellFileSystem::GetFileSize(FileHandle &handle) {
-	// You can't know the size of the data that will come over a pipe
-	// some code uses the size to allocate buffers, so don't return
-	// a very large number.
-	return 0;
-}
-
-unique_ptr<FileHandle> ShellFileSystem::OpenFile(const string &path, FileOpenFlags flags,
-                                                optional_ptr<FileOpener> opener) {
-	FILE *pipe;
-	if (path.front() == '|')
-	{
-		// We want to write to the pipe.
+		else
+		{
+			// We want to read from the pipe
 #ifndef _WIN32
-		pipe = popen(path.substr(1, path.size()).c_str(), "w");
+			pipe = popen(path.substr(0, path.size() - 1).c_str(), "r");
 #else
-		pipe = _popen(path.substr(1, path.size()).c_str(), "w");
+			pipe = _popen(path.substr(0, path.size() - 1).c_str(), "r");
 #endif
-	}
-	else
-	{
-		// We want to read from the pipe
-#ifndef _WIN32
-		pipe = popen(path.substr(0, path.size()-1).c_str(), "r");
-#else
-		pipe = _popen(path.substr(0, path.size()-1).c_str(), "r");
-#endif
-	}
+		}
 
 #ifndef _WIN32
-	Value value;
-	bool ignore_sigpipe = false;
-	if (FileOpener::TryGetCurrentSetting(opener, "ignore_sigpipe", value))
-	{
-		ignore_sigpipe = value.GetValue<bool>();
-	}
+		Value value;
+		bool ignore_sigpipe = false;
+		if (FileOpener::TryGetCurrentSetting(opener, "ignore_sigpipe", value))
+		{
+			ignore_sigpipe = value.GetValue<bool>();
+		}
 
-	if(ignore_sigpipe) {
-		signal(SIGPIPE, SIG_IGN);
-	}
+		if (ignore_sigpipe)
+		{
+			signal(SIGPIPE, SIG_IGN);
+		}
 #endif
 
-	return make_uniq<ShellFileHandle>(*this, path, pipe);
-}
-
-bool ShellFileSystem::CanHandleFile(const string &fpath) {
-	if (fpath.empty()) {
-		return false;
+		return make_uniq<ShellFileHandle>(*this, path, pipe, flags);
 	}
-	// If the filename ends with | or starts with |
-	// it can be handled by this file system.
-	return fpath.back() == '|' || fpath.front() == '|';
-}
+
+	bool ShellFileSystem::CanHandleFile(const string &fpath)
+	{
+		if (fpath.empty())
+		{
+			return false;
+		}
+		// If the filename ends with | or starts with |
+		// it can be handled by this file system.
+		return fpath.back() == '|' || fpath.front() == '|';
+	}
 
 } // namespace duckdb
