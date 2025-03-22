@@ -6,6 +6,8 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * *'  # Runs every night at 02:00 UTC
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' || github.sha }}
@@ -16,7 +18,7 @@ jobs:
     name: Build extension binaries
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
     with:
-      duckdb_version: v1.2-histrionicus
+      duckdb_version: main
       ci_tools_version: main
       extension_name: shellfs
       exclude_archs: "wasm_mvp;wasm_eh;wasm_threads"
