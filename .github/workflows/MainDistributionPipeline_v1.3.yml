@@ -1,13 +1,13 @@
 #
 # This workflow calls the main distribution pipeline from DuckDB to build, test and (optionally) release the extension
 #
-name: Main Extension Distribution Pipeline
+name: 1.3 Extension Distribution Pipeline
 on:
   push:
-     branches-ignore:
+    branches:
       - v1.3
   pull_request:
-     branches-ignore:
+    branches:
       - v1.3
   workflow_dispatch:
   schedule:
@@ -22,7 +22,7 @@ jobs:
     name: Build extension binaries
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
     with:
-      duckdb_version: main
+      duckdb_version: v1.3-ossivalis
       ci_tools_version: main
       extension_name: shellfs
       exclude_archs: "wasm_mvp;wasm_eh;wasm_threads"
