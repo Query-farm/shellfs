@@ -2,12 +2,14 @@
 
 #include "duckdb.hpp"
 
-namespace duckdb {
+namespace duckdb
+{
 
-class ShellfsExtension : public Extension {
-public:
-	void Load(DuckDB &db) override;
-	std::string Name() override;
-};
+	class ShellfsExtension : public Extension
+	{
+	public:
+		void Load(ExtensionLoader &loader) override;
+		std::string Name() override;
+	};
 
 } // namespace duckdb
