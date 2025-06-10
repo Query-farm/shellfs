@@ -4,11 +4,7 @@
 name: Main Extension Distribution Pipeline
 on:
   push:
-     branches-ignore:
-      - v1.3
   pull_request:
-     branches-ignore:
-      - v1.3
   workflow_dispatch:
   schedule:
     - cron: '0 2 * * *'  # Runs every night at 02:00 UTC

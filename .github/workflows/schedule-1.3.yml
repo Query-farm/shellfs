@@ -24,4 +24,4 @@ jobs:
 
       - name: Trigger Workflow on my-branch
         run: |
-          gh workflow run MainDistributionPipeline_v1.3.yml --ref v1.3
+          gh workflow run MainDistributionPipeline.yml --ref v1.3
