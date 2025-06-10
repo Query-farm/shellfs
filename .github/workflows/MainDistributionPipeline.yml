@@ -4,11 +4,7 @@
 name: Main Extension Distribution Pipeline
 on:
   push:
-     branches-ignore:
-      - v1.3
   pull_request:
-     branches-ignore:
-      - v1.3
   workflow_dispatch:
   schedule:
     - cron: '0 2 * * *'  # Runs every night at 02:00 UTC
@@ -22,7 +18,7 @@ jobs:
     name: Build extension binaries
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
     with:
-      duckdb_version: main
+      duckdb_version: v1.3-ossivalis
       ci_tools_version: main
       extension_name: shellfs
       exclude_archs: "wasm_mvp;wasm_eh;wasm_threads"
