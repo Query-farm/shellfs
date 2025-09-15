@@ -15,6 +15,7 @@ namespace duckdb
 		int64_t Write(FileHandle &handle, void *buffer, int64_t nr_bytes) override;
 
 		int64_t GetFileSize(FileHandle &handle) override;
+		timestamp_t GetLastModifiedTime(FileHandle &handle) override;
 
 		vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override
 		{

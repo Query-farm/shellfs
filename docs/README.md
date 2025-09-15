@@ -107,6 +107,54 @@ sh: foo: command not found
 
 The reason why there isn't an exception raised in this cause is because the `popen()` implementation starts a process with [`fork()`](https://man7.org/linux/man-pages/man2/fork.2.html) or the appropriate system call for the operating system, but when the the child process calls [`exec()`](https://man7.org/linux/man-pages/man3/exec.3.html) that fails, and there was no output produced by the child process.
 
+#### Handling Exit Codes
+
+By default, this extension expects the executed command to exit with status code 0.
+
+In some cases, it is useful to accept additional exit codes as "successful" — for example, when `grep` does not find a match and returns 1.
+
+To support this, this extension provides an exit code specification that can be attached to a command.
+
+##### Syntax
+
+A command path must always end with a pipe (`|`) character.
+
+An optional exit code specification may be added immediately before this final pipe: `{allowed_exit_codes=N[,M,...]}|`
+
+* `N[,M,...]` = one or more non-negative integer exit codes
+* Codes must be separated by commas (no spaces).
+* There must be no space between the closing `}` and the final `|`.
+* If no specification is provided, the default allowed exit code set is 0.
+
+Any other text containing `{allowed_exit_codes=...}` earlier in the command is ignored. Only the last occurrence before the final `|` is interpreted.
+
+An example demonstrating this option is below:
+
+```sql
+-- Base case
+SELECT content FROM read_text('uname | grep Darwin |');
+┌──────────┐
+│ content  │
+│ varchar  │
+├──────────┤
+│ Darwin\n │
+└──────────┘
+
+-- Grep exits with code 1 but treated as an error.
+SELECT content FROM read_text('uname | grep -v Darwin |');
+IO Error:
+Pipe process exited abnormally code=1: uname | grep -v Darwin |
+
+-- Grep exits with code 1 but is now treated as a success.
+ SELECT content FROM read_text('uname | grep -v Darwin {allowed_exit_codes=0,1}|');
+┌─────────┐
+│ content │
+│ varchar │
+├─────────┤
+│         │
+└─────────┘
+```
+
 ### Writing output to a pipe
 
 ```sql

@@ -5,6 +5,14 @@
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/limits.hpp"
 
+#include <iostream>
+#include <string>
+#include <vector>
+#include <sstream>
+#include <stdexcept>
+#include <unordered_set>
+#include <cctype>
+
 #ifndef _WIN32
 #include <dirent.h>
 #include <fcntl.h>
@@ -16,8 +24,6 @@
 #include <stdlib.h>
 #include <sys/wait.h>
 
-#include <iostream>
-#include <stdexcept>
 #include <cstring>
 #include <cstdlib>
 
@@ -33,10 +39,105 @@
 namespace duckdb
 {
 
+	struct ParsedInputCommand
+	{
+		std::string command;
+		std::unordered_set<int> allowed_exit_codes;
+	};
+
+	// Trim utility
+	static inline std::string trim(const std::string &s)
+	{
+		auto start = s.find_first_not_of(" \t\n\r");
+		auto end = s.find_last_not_of(" \t\n\r");
+		if (start == std::string::npos)
+			return "";
+		return s.substr(start, end - start + 1);
+	}
+
+	static inline bool isNonNegativeInteger(const std::string &s)
+	{
+		if (s.empty())
+			return false;
+		for (char c : s)
+		{
+			if (!std::isdigit(static_cast<unsigned char>(c)))
+				return false;
+		}
+		return true;
+	}
+
+	ParsedInputCommand parseInputCommand(const std::string &input)
+	{
+		ParsedInputCommand result;
+
+		if (input.empty() || input.back() != '|')
+		{
+			throw std::runtime_error("Command must end with '|'.");
+		}
+
+		std::string marker = "{allowed_exit_codes=";
+		auto lastPipe = input.size() - 1; // index of final '|'
+
+		// Look for the last '{allowed_exit_codes=...}' that ends right before the final '|'
+		auto closeBrace = input.rfind('}', lastPipe);
+		if (closeBrace != std::string::npos && closeBrace + 1 == lastPipe)
+		{
+			auto openBrace = input.rfind(marker, closeBrace);
+			if (openBrace != std::string::npos)
+			{
+				// Extract the command (everything before the spec)
+				result.command = trim(input.substr(0, openBrace));
+
+				// Extract codes inside {...}
+				std::string codes_str = input.substr(openBrace + marker.size(),
+																						 closeBrace - (openBrace + marker.size()));
+				std::stringstream ss(codes_str);
+				std::string token;
+
+				while (std::getline(ss, token, ','))
+				{
+					token = trim(token);
+					if (token.empty())
+						continue;
+
+					if (!isNonNegativeInteger(token))
+					{
+						throw std::runtime_error("Invalid exit code: '" + token + "'. Must be a non-negative integer.");
+					}
+
+					int value = std::stoi(token);
+					result.allowed_exit_codes.insert(value); // deduplicated automatically
+				}
+
+				if (result.allowed_exit_codes.empty())
+				{
+					throw std::runtime_error("No valid exit codes parsed.");
+				}
+
+				return result;
+			}
+		}
+
+		// No final allowed_exit_codes spec → default to 0
+		result.command = trim(input.substr(0, lastPipe));
+		result.allowed_exit_codes.insert(0);
+		return result;
+	}
+
 	struct ShellFileHandle : public FileHandle
 	{
+		friend class ShellFileSystem;
+
 	public:
-		ShellFileHandle(FileSystem &file_system, string path, FILE *pipe, FileOpenFlags flags) : FileHandle(file_system, std::move(path), std::move(flags)), pipe(pipe)
+		ShellFileHandle(FileSystem &file_system, string path, FILE *pipe, FileOpenFlags flags)
+				: FileHandle(file_system, std::move(path), std::move(flags)), pipe(pipe)
+		{
+			allowed_exit_codes.insert(0);
+		}
+
+		ShellFileHandle(FileSystem &file_system, string path, FILE *pipe, FileOpenFlags flags, std::unordered_set<int> allowed_exit_codes)
+				: FileHandle(file_system, std::move(path), std::move(flags)), pipe(pipe), allowed_exit_codes(std::move(allowed_exit_codes))
 		{
 		}
 		~ShellFileHandle() override
@@ -44,7 +145,9 @@ namespace duckdb
 			ShellFileHandle::Close();
 		}
 
+	private:
 		FILE *pipe;
+		std::unordered_set<int> allowed_exit_codes;
 
 	public:
 		void Close() override
@@ -75,18 +178,14 @@ namespace duckdb
 				if (WIFEXITED(result))
 				{
 					int exit_status = WEXITSTATUS(result);
-					if (exit_status != 0)
+					if (allowed_exit_codes.find(exit_status) == allowed_exit_codes.end())
 					{
-						throw IOException("Pipe process exited with non-zero exit code=\"%d\": %s", exit_status, path);
+						throw IOException("Pipe process exited abnormally code=%d: %s", exit_status, path);
 					}
 					else if (WIFSIGNALED(result))
 					{
 						int signal_number = WTERMSIG(result);
-						throw IOException("Pipe process exited with signal signal=\"%d\": %s", signal_number, path);
-					}
-					else if (exit_status != 0)
-					{
-						throw IOException("Pipe process exited abnormally: %s", path);
+						throw IOException("Pipe process exited with signal signal=%d: %s", signal_number, path);
 					}
 				}
 #endif
@@ -154,10 +253,17 @@ namespace duckdb
 		return 0;
 	}
 
+	timestamp_t ShellFileSystem::GetLastModifiedTime(FileHandle &handle)
+	{
+		// You can't know the last modified time of a pipe
+		return timestamp_t(0);
+	}
+
 	unique_ptr<FileHandle> ShellFileSystem::OpenFile(const string &path, FileOpenFlags flags,
 																									 optional_ptr<FileOpener> opener)
 	{
 		FILE *pipe;
+		unique_ptr<ShellFileHandle> result;
 		if (path.front() == '|')
 		{
 			// We want to write to the pipe.
@@ -166,15 +272,19 @@ namespace duckdb
 #else
 			pipe = _popen(path.substr(1, path.size()).c_str(), "w");
 #endif
+			result = make_uniq<ShellFileHandle>(*this, path, pipe, flags);
 		}
 		else
 		{
 			// We want to read from the pipe
+			auto parsed = parseInputCommand(path);
+
 #ifndef _WIN32
-			pipe = popen(path.substr(0, path.size() - 1).c_str(), "r");
+			pipe = popen(parsed.command.c_str(), "r");
 #else
-			pipe = _popen(path.substr(0, path.size() - 1).c_str(), "r");
+			pipe = _popen(parsed.command.c_str(), "r");
 #endif
+			result = make_uniq<ShellFileHandle>(*this, path, pipe, flags, parsed.allowed_exit_codes);
 		}
 
 #ifndef _WIN32
@@ -191,7 +301,7 @@ namespace duckdb
 		}
 #endif
 
-		return make_uniq<ShellFileHandle>(*this, path, pipe, flags);
+		return result;
 	}
 
 	bool ShellFileSystem::CanHandleFile(const string &fpath)
