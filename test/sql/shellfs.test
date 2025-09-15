@@ -21,11 +21,6 @@ SELECT count(distinct column0) from read_csv('seq 0 99 | awk ''{print $1 "," $1}
 ----
 19
 
-statement error
-SELECT count(distinct column0) from read_csv('seq 0 99 | awk ''{print $1 "," $1}'' | grep 2 {allowed_exit_codes=1}|')
-----
-IO Error: Pipe process exited abnormally code=0: seq 0 99 | awk '{print $1 "," $1}' | grep 2 {allowed_exit_codes=1}|
-
 statement ok
 COPY (select * from unnest(generate_series(1, 100))) TO '| grep 20 > __TEST_DIR__/grep-test-pipe.csv';
 

@@ -6,7 +6,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/scalar_function.hpp"
-
+#include "query_farm_telemetry.hpp"
 namespace duckdb
 {
 
@@ -22,6 +22,8 @@ namespace duckdb
 
 		// When writing to a PIPE ignore the SIGPIPE error and consider that the write succeeded.
 		config.AddExtensionOption("ignore_sigpipe", "Ignore SIGPIPE", LogicalType::BOOLEAN, Value(false));
+
+		QueryFarmSendTelemetry(loader, instance.shared_from_this(), "shellfs", "2025091501");
 	}
 
 	void ShellfsExtension::Load(ExtensionLoader &loader)
