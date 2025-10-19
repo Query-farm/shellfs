@@ -12,7 +12,6 @@
 #define INTERNAL_FUNC
 #endif
 
-namespace duckdb
-{
-  void QueryFarmSendTelemetry(ExtensionLoader &loader, shared_ptr<DatabaseInstance> db, const string &extension_name, const string &extension_version);
+namespace duckdb {
+void QueryFarmSendTelemetry(ExtensionLoader &loader, const string &extension_name, const string &extension_version);
 }
