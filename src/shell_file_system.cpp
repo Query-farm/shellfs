@@ -169,7 +169,7 @@ namespace duckdb
 
 			if (result == -1)
 			{
-				throw IOException("Could not close pipe \"%s\": %s", {{"errno", std::to_string(errno)}}, path,
+				throw IOException({{"errno", std::to_string(errno)}}, "Could not close pipe \"%s\": %s", path,
 													strerror(errno));
 			}
 			else
@@ -210,7 +210,7 @@ namespace duckdb
 		int64_t bytes_read = fread(buffer, 1, nr_bytes, pipe);
 		if (bytes_read == -1)
 		{
-			throw IOException("Could not read from pipe \"%s\": %s", {{"errno", std::to_string(errno)}}, handle.path,
+			throw IOException({{"errno", std::to_string(errno)}}, "Could not read from pipe \"%s\": %s", handle.path,
 												strerror(errno));
 		}
 		if (bytes_read == 0)
@@ -234,7 +234,7 @@ namespace duckdb
 			int64_t current_bytes_written = fwrite(buffer, 1, bytes_to_write, pipe);
 			if (current_bytes_written <= 0)
 			{
-				throw IOException("Could not write to pipe \"%s\": %s", {{"errno", std::to_string(errno)}}, handle.path,
+				throw IOException({{"errno", std::to_string(errno)}}, "Could not write to pipe \"%s\": %s", handle.path,
 													strerror(errno));
 			}
 			bytes_written += current_bytes_written;
