@@ -73,7 +73,7 @@ namespace duckdb
 
 		if (input.empty() || input.back() != '|')
 		{
-			throw std::runtime_error("Command must end with '|'.");
+			throw InvalidInputException("Command must end with '|'.");
 		}
 
 		std::string marker = "{allowed_exit_codes=";
@@ -103,16 +103,24 @@ namespace duckdb
 
 					if (!isNonNegativeInteger(token))
 					{
-						throw std::runtime_error("Invalid exit code: '" + token + "'. Must be a non-negative integer.");
+						throw InvalidInputException("Invalid exit code: '%s'. Must be a non-negative integer.", token);
 					}
 
-					int value = std::stoi(token);
+					int value;
+					try
+					{
+						value = std::stoi(token);
+					}
+					catch (const std::out_of_range &)
+					{
+						throw InvalidInputException("Exit code out of range: '%s'. Value too large.", token);
+					}
 					result.allowed_exit_codes.insert(value); // deduplicated automatically
 				}
 
 				if (result.allowed_exit_codes.empty())
 				{
-					throw std::runtime_error("No valid exit codes parsed.");
+					throw InvalidInputException("No valid exit codes parsed.");
 				}
 
 				return result;

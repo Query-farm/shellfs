@@ -12,6 +12,8 @@ The extension is a DuckDB Community Extension using `popen()` for process pipes.
 
 ## Build Commands
 
+This extension does not use vcpkg.
+
 ```bash
 # Build release version
 GEN=ninja make release
