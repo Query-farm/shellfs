@@ -142,7 +142,14 @@ namespace duckdb
 		}
 		~ShellFileHandle() override
 		{
-			ShellFileHandle::Close();
+			try
+			{
+				ShellFileHandle::Close();
+			}
+			catch (const std::exception &e)
+			{
+				printf("Exception in ShellFileHandle destructor: %s\n", e.what());
+			}
 		}
 
 	private:
@@ -182,11 +189,17 @@ namespace duckdb
 					{
 						throw IOException("Pipe process exited abnormally code=%d: %s", exit_status, path);
 					}
-					else if (WIFSIGNALED(result))
-					{
-						int signal_number = WTERMSIG(result);
-						throw IOException("Pipe process exited with signal signal=%d: %s", signal_number, path);
-					}
+				}
+				else if (WIFSIGNALED(result))
+				{
+					int signal_number = WTERMSIG(result);
+					throw IOException("Pipe process exited with signal signal=%d: %s", signal_number, path);
+				}
+#else
+				// On Windows, _pclose() returns the exit status directly
+				if (allowed_exit_codes.find(result) == allowed_exit_codes.end())
+				{
+					throw IOException("Pipe process exited abnormally code=%d: %s", result, path);
 				}
 #endif
 			}
@@ -272,6 +285,11 @@ namespace duckdb
 #else
 			pipe = _popen(path.substr(1, path.size()).c_str(), "w");
 #endif
+			if (!pipe)
+			{
+				throw IOException("Could not open pipe for writing \"%s\": %s", {{"errno", std::to_string(errno)}}, path,
+													strerror(errno));
+			}
 			result = make_uniq<ShellFileHandle>(*this, path, pipe, flags);
 		}
 		else
@@ -284,6 +302,11 @@ namespace duckdb
 #else
 			pipe = _popen(parsed.command.c_str(), "r");
 #endif
+			if (!pipe)
+			{
+				throw IOException("Could not open pipe for reading \"%s\": %s", {{"errno", std::to_string(errno)}}, path,
+													strerror(errno));
+			}
 			result = make_uniq<ShellFileHandle>(*this, path, pipe, flags, parsed.allowed_exit_codes);
 		}
 
