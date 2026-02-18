@@ -105,7 +105,7 @@ sh: foo: command not found
 └─────────────────────────┘
 ```
 
-The reason why there isn't an exception raised in this cause is because the `popen()` implementation starts a process with [`fork()`](https://man7.org/linux/man-pages/man2/fork.2.html) or the appropriate system call for the operating system, but when the the child process calls [`exec()`](https://man7.org/linux/man-pages/man3/exec.3.html) that fails, and there was no output produced by the child process.
+The reason why there isn't an exception raised in this case is because the `popen()` implementation starts a process with [`fork()`](https://man7.org/linux/man-pages/man2/fork.2.html) or the appropriate system call for the operating system, but when the the child process calls [`exec()`](https://man7.org/linux/man-pages/man3/exec.3.html) that fails, and there was no output produced by the child process.
 
 #### Handling Exit Codes
 
