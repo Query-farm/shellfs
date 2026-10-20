@@ -1,13 +1,35 @@
 # name: test/sql/json.test
-# description: test shellfs extension
+# description: read JSON produced by a local shell command (no network access needed)
 # group: [shellfs]
 
-# Require statement will ensure this test is run with this extension loaded
 require shellfs
 
 require json
 
 query I
-SELECT count(*) FROM (DESCRIBE select * from read_json('curl -s http://worldtimeapi.org/api/timezone/Etc/UTC  |'));
+SELECT count(*) FROM (DESCRIBE SELECT * FROM read_json('printf ''{"id": 1, "name": "a", "tags": ["x"], "nested": {"k": 1.5}}\n'' |'));
 ----
-15
+4
+
+query ITT
+SELECT id, name, tags FROM read_json('printf ''{"id": 1, "name": "a", "tags": ["x"]}\n{"id": 2, "name": "b", "tags": []}\n'' |') ORDER BY id;
+----
+1	a	[x]
+2	b	[]
+
+# A JSON array document spread over several lines
+query II
+SELECT sum(v), count(*) FROM read_json('echo "["; for i in 1 2 3 4; do echo "{\"v\": $i},"; done; echo "{\"v\": 5}]" |');
+----
+15	5
+
+# Write JSON to a pipe and read it back through another pipe
+statement ok
+COPY (SELECT range AS n, 'row ' || range AS label FROM range(3)) TO '| cat > {TEST_DIR}/out.json' (FORMAT json);
+
+query IT
+SELECT n, label FROM read_json('cat {TEST_DIR}/out.json |') ORDER BY n;
+----
+0	row 0
+1	row 1
+2	row 2

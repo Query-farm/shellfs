@@ -8,7 +8,7 @@ This is the `shellfs` DuckDB extension that enables Unix pipes for input/output 
 - Read from shell commands by appending `|` to a filename (e.g., `read_csv('seq 1 100 |')`)
 - Write to shell commands by prefixing `|` to a filename (e.g., `COPY ... TO '| grep 6 > output.csv'`)
 
-The extension is a DuckDB Community Extension using `popen()` for process pipes.
+The extension is a DuckDB Community Extension using process pipes (`posix_spawn()` of `/bin/sh -c` on POSIX, `_popen()` on Windows).
 
 ## Build Commands
 
@@ -51,13 +51,14 @@ When making changes the version should always be updated to the current date plu
 The extension registers a custom filesystem (`ShellFileSystem`) with DuckDB:
 
 - **`src/shellfs_extension.cpp`**: Extension entry point. Registers `ShellFileSystem` and the `ignore_sigpipe` config option.
-- **`src/shell_file_system.cpp`**: Core implementation. `ShellFileSystem` handles pipe detection (paths starting or ending with `|`) and uses `popen()`/`pclose()` for process I/O. `ShellFileHandle` manages pipe lifecycle and exit code validation.
+- **`src/shell_file_system.cpp`**: Core implementation. `ShellFileSystem` handles pipe detection (paths starting or ending with `|`) and spawns `/bin/sh -c <command>` with `posix_spawn()` (child gets default SIGPIPE disposition) on POSIX, `_popen()` on Windows. `ShellFileHandle` manages pipe lifecycle and exit code validation.
 - **`src/include/shell_file_system.hpp`**: Header defining `ShellFileSystem` class.
 
 Key behavior:
 - Paths ending with `|` are read pipes; paths starting with `|` are write pipes
 - Exit code specification via `{allowed_exit_codes=N,M}|` suffix allows non-zero exits (useful for `grep`)
-- `ignore_sigpipe` setting prevents crashes when writing to pipes that close early
+- Writes block SIGPIPE in the writing thread, so a command that exits early yields EPIPE (an error) instead of killing the process
+- `ignore_sigpipe` setting treats a pipe closed early as success: remaining output to a write pipe is discarded, and a read-pipe command terminated by SIGPIPE (DuckDB stopped reading, e.g. LIMIT) is not an error
 
 ## Test Structure
 

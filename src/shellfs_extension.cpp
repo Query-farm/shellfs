@@ -20,8 +20,12 @@ namespace duckdb
 
 		auto &config = DBConfig::GetConfig(instance);
 
-		// When writing to a PIPE ignore the SIGPIPE error and consider that the write succeeded.
-		config.AddExtensionOption("ignore_sigpipe", "Ignore SIGPIPE", LogicalType::BOOLEAN, Value(false));
+		// When a command stops reading its input before DuckDB has written everything (e.g. '| head -1'),
+		// discard the rest of the output instead of failing; and when DuckDB stops reading a command's output
+		// early (e.g. LIMIT), do not treat the command being terminated by SIGPIPE as an error.
+		config.AddExtensionOption("ignore_sigpipe",
+															"Treat a pipe closed early by either side (EPIPE / SIGPIPE) as success instead of an error",
+															LogicalType::BOOLEAN, Value(false));
 
 		QueryFarmSendTelemetry(loader, "shellfs", "2026072501");
 	}

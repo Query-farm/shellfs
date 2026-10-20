@@ -22,9 +22,9 @@ SELECT count(distinct column0) from read_csv('seq 0 99 | awk ''{print $1 "," $1}
 19
 
 statement ok
-COPY (select * from unnest(generate_series(1, 100))) TO '| grep 20 > __TEST_DIR__/grep-test-pipe.csv';
+COPY (select * from unnest(generate_series(1, 100))) TO '| grep 20 > {TEST_DIR}/grep-test-pipe.csv';
 
 query I
-SELECT column0 FROM read_csv_auto('__TEST_DIR__/grep-test-pipe.csv');
+SELECT column0 FROM read_csv_auto('{TEST_DIR}/grep-test-pipe.csv');
 ----
 20
