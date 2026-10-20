@@ -27,6 +27,13 @@ namespace duckdb
 			return false;
 		}
 
+		// A shell command is never a directory. DuckDB 2.0's COPY ... TO checks this
+		// for the destination, and the FileSystem default throws NotImplemented.
+		bool DirectoryExists(const string &directory, optional_ptr<FileOpener> opener = nullptr) override
+		{
+			return false;
+		}
+
 		void Reset(FileHandle &handle) override;
 		bool OnDiskFile(FileHandle &handle) override
 		{
