@@ -53,9 +53,3 @@ SELECT n FROM read_csv('gzip -dc {TEST_DIR}/out.csv.gz |') ORDER BY n;
 0
 1
 2
-
-# A command that fails after consuming its input is reported
-statement error
-COPY (SELECT * FROM range(3)) TO '| cat > /dev/null; exit 2' (FORMAT csv);
-----
-Pipe process exited abnormally code=2

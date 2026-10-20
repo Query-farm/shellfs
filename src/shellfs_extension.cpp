@@ -27,7 +27,7 @@ namespace duckdb
 															"Treat a pipe closed early by either side (EPIPE / SIGPIPE) as success instead of an error",
 															LogicalType::BOOLEAN, Value(false));
 
-		QueryFarmSendTelemetry(loader, "shellfs", "2026102001");
+		QueryFarmSendTelemetry(loader, "shellfs", "2026102002");
 	}
 
 	void ShellfsExtension::Load(ExtensionLoader &loader)

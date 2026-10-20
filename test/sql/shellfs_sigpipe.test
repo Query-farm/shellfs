@@ -4,6 +4,10 @@
 
 require shellfs
 
+# The commands in this file use POSIX shell syntax (';', '$?', 'exit N', subshells, /dev/null) and
+# POSIX exit statuses and signals. On Windows commands are run by cmd.exe.
+require notwindows
+
 # Writing much more than the pipe buffer to a command that exits after the first line.
 # By default this is an error (and must not kill the process with SIGPIPE).
 statement error

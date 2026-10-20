@@ -19,7 +19,7 @@ SELECT id, name, tags FROM read_json('printf ''{"id": 1, "name": "a", "tags": ["
 
 # A JSON array document spread over several lines
 query II
-SELECT sum(v), count(*) FROM read_json('echo "["; for i in 1 2 3 4; do echo "{\"v\": $i},"; done; echo "{\"v\": 5}]" |');
+SELECT sum(v), count(*) FROM read_json('printf ''[\n{"v": 1},\n{"v": 2},\n{"v": 3},\n{"v": 4},\n{"v": 5}\n]\n'' |');
 ----
 15	5
 
