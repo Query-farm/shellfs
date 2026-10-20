@@ -151,6 +151,11 @@ namespace duckdb
 	// Blocks SIGPIPE for the calling thread while a write to a pipe is in progress, so that writing to a
 	// command that has exited raises EPIPE instead of terminating the whole process. A SIGPIPE raised by
 	// the write is consumed before the previous signal mask is restored.
+	//
+	// This relies on SIGPIPE being directed at the writing thread, as on Linux. On macOS (XNU) the SIGPIPE
+	// raised by write() is sent to the whole process and can be delivered to any thread that does not block
+	// it, so there the write end of the pipe is additionally marked with F_SETNOSIGPIPE (see
+	// SpawnShellCommand) and no signal is raised at all.
 	class SigpipeGuard
 	{
 	public:
@@ -208,6 +213,15 @@ namespace duckdb
 		const int child_target = for_writing ? STDIN_FILENO : STDOUT_FILENO;
 		fcntl(fds[0], F_SETFD, FD_CLOEXEC);
 		fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+#ifdef F_SETNOSIGPIPE
+		if (for_writing)
+		{
+			// Writing to the pipe after the command exited fails with EPIPE without raising SIGPIPE, which
+			// would otherwise be delivered to (and kill) the process on platforms where it is not
+			// thread-directed (macOS).
+			fcntl(parent_fd, F_SETNOSIGPIPE, 1);
+		}
+#endif
 
 		posix_spawn_file_actions_t actions;
 		posix_spawnattr_t attr;
@@ -292,6 +306,8 @@ namespace duckdb
 		bool output_closed = false;
 #else
 		FILE *pipe;
+		//! Set once a write found that the command no longer reads its input (only with ignore_sigpipe).
+		bool output_closed = false;
 #endif
 		std::unordered_set<int> allowed_exit_codes;
 		//! Value of the ignore_sigpipe setting when the pipe was opened.
@@ -457,10 +473,22 @@ namespace duckdb
 			nr_bytes -= current_bytes_written;
 		}
 #else
+		if (shell_handle.output_closed)
+		{
+			// The command stopped reading (ignore_sigpipe): discard the rest of the output.
+			return requested_bytes;
+		}
+
 		while (nr_bytes > 0)
 		{
 			auto bytes_to_write = MinValue<idx_t>(idx_t(NumericLimits<int32_t>::Maximum()), idx_t(nr_bytes));
 			int64_t current_bytes_written = fwrite(buffer, 1, bytes_to_write, shell_handle.pipe);
+			if (current_bytes_written < int64_t(bytes_to_write) && errno == EPIPE && shell_handle.ignore_sigpipe)
+			{
+				// The command exited before reading everything; see the POSIX implementation above.
+				shell_handle.output_closed = true;
+				return requested_bytes;
+			}
 			if (current_bytes_written <= 0)
 			{
 				throw IOException({{"errno", std::to_string(errno)}}, "Could not write to pipe \"%s\": %s", handle.path,
@@ -526,7 +554,9 @@ namespace duckdb
 		return make_uniq<ShellFileHandle>(*this, path, fd, child_pid, flags, std::move(allowed_exit_codes),
 																			ignore_sigpipe);
 #else
-		FILE *pipe = _popen(command.c_str(), for_writing ? "w" : "r");
+		// Binary mode: in the default text mode the CRT translates "\n" to "\r\n" when writing (and back,
+		// and stops at Ctrl-Z, when reading), which corrupts binary data such as Parquet files.
+		FILE *pipe = _popen(command.c_str(), for_writing ? "wb" : "rb");
 		if (!pipe)
 		{
 			throw IOException({{"errno", std::to_string(errno)}}, "Could not open pipe for %s \"%s\": %s",

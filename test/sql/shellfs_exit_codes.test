@@ -4,6 +4,10 @@
 
 require shellfs
 
+# The commands in this file use POSIX shell syntax (';', '$?', 'exit N', subshells, /dev/null) and
+# POSIX exit statuses and signals. On Windows commands are run by cmd.exe.
+require notwindows
+
 query I
 SELECT a FROM read_csv('printf "a\n1\n" |');
 ----
@@ -59,3 +63,9 @@ statement error
 SELECT * FROM read_csv('echo 1 {allowed_exit_codes=99999999999}|');
 ----
 Exit code out of range
+
+# A command that fails after consuming the data written to it is reported
+statement error
+COPY (SELECT * FROM range(3)) TO '| cat > /dev/null; exit 2' (FORMAT csv);
+----
+Pipe process exited abnormally code=2
