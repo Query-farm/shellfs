@@ -1,6 +1,5 @@
 cmake_minimum_required(VERSION 3.5)
 
-# Set extension name here
 set(TARGET_NAME shellfs)
 set(CMAKE_CXX_STANDARD 17)
 
@@ -10,10 +9,7 @@ set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 project(${TARGET_NAME})
 include_directories(src/include)
 
-set(EXTENSION_SOURCES
-src/shellfs_extension.cpp
-src/shell_file_system.cpp
-src/query_farm_telemetry.cpp)
+set(EXTENSION_SOURCES src/shellfs_extension.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

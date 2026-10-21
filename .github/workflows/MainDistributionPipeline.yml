@@ -2,11 +2,9 @@ name: Main Extension Distribution Pipeline
 on:
   push:
     branches:
-    - v2.0
+    - v2.0-community-stub
   pull_request: null
   workflow_dispatch: null
-  schedule:
-  - cron: 0 2 * * *
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{
     github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' || github.sha }}
@@ -19,6 +17,5 @@ jobs:
       duckdb_version: v2.0-cyanoptera
       ci_tools_version: query-farm
       extension_name: shellfs
-      exclude_archs: wasm_mvp;wasm_eh;wasm_threads
     secrets:
       ccache_remote_token: ${{ secrets.QUERY_FARM_CCACHE_TOKEN }}
