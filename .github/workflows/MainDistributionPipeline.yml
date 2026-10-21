@@ -4,7 +4,12 @@ on:
     branches:
     - v2.0
   pull_request: null
-  workflow_dispatch: null
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Sign and verify, but upload nothing to the Query.Farm repository
+        type: boolean
+        default: false
   schedule:
   - cron: 0 2 * * *
 concurrency:
@@ -14,11 +19,27 @@ concurrency:
 jobs:
   duckdb-stable-build:
     name: Build extension binaries
-    uses: Query-farm/extension-ci-tools/.github/workflows/_extension_distribution.yml@query-farm
+    uses: Query-farm/extension-ci-tools/.github/workflows/build.yml@query-farm
     with:
-      duckdb_version: v2.0-cyanoptera
+      duckdb_version: v2.0.0
       ci_tools_version: query-farm
-      extension_name: shellfs
+      groups: |
+        main:
+          config: extension_config.cmake
+          toolchain: main
       exclude_archs: wasm_mvp;wasm_eh;wasm_threads
     secrets:
       ccache_remote_token: ${{ secrets.QUERY_FARM_CCACHE_TOKEN }}
+  duckdb-deploy:
+    name: Deploy to duckdb-extensions.query.farm
+    needs: duckdb-stable-build
+    if: github.event_name != 'pull_request' && (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/v2.0' || startsWith(github.ref, 'refs/tags/'))
+    uses: Query-farm/extension-ci-tools/.github/workflows/_query_farm_deploy.yml@query-farm
+    with:
+      extension_name: shellfs
+      duckdb_version: v2.0.0
+      dry_run: ${{ inputs.dry_run == true }}
+    secrets:
+      signing_key: ${{ secrets.QUERY_FARM_EXTENSION_SIGNING_KEY }}
+      r2_access_key_id: ${{ secrets.QUERY_FARM_R2_ACCESS_KEY_ID }}
+      r2_secret_access_key: ${{ secrets.QUERY_FARM_R2_SECRET_ACCESS_KEY }}
