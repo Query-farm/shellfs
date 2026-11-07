@@ -7,8 +7,9 @@ require shellfs
 # POSIX paths and shell syntax
 require notwindows
 
+# '/' rather than e.g. '/tmp/', which is a symlink on macOS (DuckDB's own check would then refuse first)
 statement ok
-SET allowed_directories = ['/tmp/'];
+SET allowed_directories = ['/'];
 
 statement ok
 SET enable_external_access = false;
@@ -16,11 +17,11 @@ SET enable_external_access = false;
 # DuckDB's allowed_directories check is a prefix match on the path, which this command passes;
 # shellfs itself refuses to run it.
 statement error
-SELECT * FROM read_csv('/tmp/x; echo 1 |', header = false);
+SELECT * FROM read_csv('/x; echo 1 |', header = false);
 ----
 shellfs commands are disabled because enable_external_access is false
 
 statement error
-SELECT * FROM read_csv('/tmp/ {allowed_exit_codes=0,127}|', header = false);
+SELECT * FROM read_csv('/ {allowed_exit_codes=0,127}|', header = false);
 ----
 shellfs commands are disabled because enable_external_access is false
