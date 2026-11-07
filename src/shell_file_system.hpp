@@ -5,9 +5,15 @@
 namespace duckdb
 {
 
+	class DatabaseInstance;
+
 	class ShellFileSystem : public FileSystem
 	{
 	public:
+		explicit ShellFileSystem(DatabaseInstance &db) : db(db)
+		{
+		}
+
 		duckdb::unique_ptr<FileHandle> OpenFile(const string &path, FileOpenFlags flags,
 																						optional_ptr<FileOpener> opener = nullptr) final;
 
@@ -58,6 +64,10 @@ namespace duckdb
 		{
 			return "ShellFileSystem";
 		}
+
+	private:
+		//! The database this file system is registered with (it owns the file system).
+		DatabaseInstance &db;
 	};
 
 } // namespace duckdb

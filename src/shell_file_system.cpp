@@ -9,6 +9,12 @@
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/limits.hpp"
+#include "duckdb/common/string_util.hpp"
+#include "duckdb/logging/logger.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/main/config.hpp"
+#include "duckdb/main/database.hpp"
+#include "duckdb/main/settings.hpp"
 
 #include <iostream>
 #include <string>
@@ -17,6 +23,9 @@
 #include <stdexcept>
 #include <unordered_set>
 #include <cctype>
+#include <chrono>
+#include <thread>
+#include <memory>
 
 #ifndef _WIN32
 #include <dirent.h>
@@ -30,6 +39,7 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <pthread.h>
+#include <poll.h>
 
 #ifdef __APPLE__
 #include <crt_externs.h>
@@ -223,6 +233,10 @@ namespace duckdb
 		}
 #endif
 
+		// DuckDB's end of the pipe is non-blocking: Read and Write wait for it with poll() and a timeout, so that
+		// they notice an interrupted query, and a large write() must not block once the pipe is full.
+		fcntl(parent_fd, F_SETFL, fcntl(parent_fd, F_GETFL) | O_NONBLOCK);
+
 		posix_spawn_file_actions_t actions;
 		posix_spawnattr_t attr;
 		posix_spawn_file_actions_init(&actions);
@@ -265,6 +279,14 @@ namespace duckdb
 	}
 #endif
 
+	//! How often a blocked read from / write to a pipe wakes up to check whether the query was interrupted.
+	static constexpr int PIPE_POLL_INTERVAL_MS = 100;
+	//! How long a command is given to exit after DuckDB stopped reading its output early (e.g. LIMIT) before
+	//! it is terminated. A command that is still writing normally exits at once with SIGPIPE.
+	static constexpr int64_t EARLY_CLOSE_GRACE_MS = 1000;
+	//! How long a command is given to exit after SIGTERM before it is killed with SIGKILL.
+	static constexpr int64_t TERMINATE_GRACE_MS = 1000;
+
 	struct ShellFileHandle : public FileHandle
 	{
 		friend class ShellFileSystem;
@@ -272,29 +294,43 @@ namespace duckdb
 	public:
 #ifndef _WIN32
 		ShellFileHandle(FileSystem &file_system, string path, int fd, pid_t child_pid, FileOpenFlags flags,
-										std::unordered_set<int> allowed_exit_codes, bool ignore_sigpipe)
+										bool for_writing, std::unordered_set<int> allowed_exit_codes, bool ignore_sigpipe,
+										weak_ptr<ClientContext> context)
 				: FileHandle(file_system, std::move(path), std::move(flags)), fd(fd), child_pid(child_pid),
-					allowed_exit_codes(std::move(allowed_exit_codes)), ignore_sigpipe(ignore_sigpipe)
+					for_writing(for_writing), allowed_exit_codes(std::move(allowed_exit_codes)),
+					ignore_sigpipe(ignore_sigpipe), context(std::move(context))
 		{
 		}
 #else
-		ShellFileHandle(FileSystem &file_system, string path, FILE *pipe, FileOpenFlags flags,
-										std::unordered_set<int> allowed_exit_codes, bool ignore_sigpipe)
-				: FileHandle(file_system, std::move(path), std::move(flags)), pipe(pipe),
-					allowed_exit_codes(std::move(allowed_exit_codes)), ignore_sigpipe(ignore_sigpipe)
+		ShellFileHandle(FileSystem &file_system, string path, FILE *pipe, FileOpenFlags flags, bool for_writing,
+										std::unordered_set<int> allowed_exit_codes, bool ignore_sigpipe,
+										weak_ptr<ClientContext> context)
+				: FileHandle(file_system, std::move(path), std::move(flags)), pipe(pipe), for_writing(for_writing),
+					allowed_exit_codes(std::move(allowed_exit_codes)), ignore_sigpipe(ignore_sigpipe),
+					context(std::move(context))
 		{
 		}
 #endif
 
 		~ShellFileHandle() override
 		{
+			// A destructor must not throw: report a failure of the command through DuckDB's logger instead.
+			string error;
 			try
 			{
-				ShellFileHandle::Close();
+				error = Finish(true);
+			}
+			catch (const InterruptException &)
+			{
+				// The query was interrupted; the command has been terminated.
 			}
 			catch (const std::exception &e)
 			{
-				printf("Exception in ShellFileHandle destructor: %s\n", e.what());
+				error = e.what();
+			}
+			if (!error.empty())
+			{
+				LogWarning(error);
 			}
 		}
 
@@ -302,16 +338,20 @@ namespace duckdb
 #ifndef _WIN32
 		int fd;
 		pid_t child_pid;
-		//! Set once a write found that the command no longer reads its input (only with ignore_sigpipe).
-		bool output_closed = false;
 #else
 		FILE *pipe;
+#endif
+		//! True for '| command' (DuckDB writes to the command's stdin), false for 'command |'.
+		bool for_writing;
+		//! Set once a read found the end of the command's output.
+		bool reached_eof = false;
 		//! Set once a write found that the command no longer reads its input (only with ignore_sigpipe).
 		bool output_closed = false;
-#endif
 		std::unordered_set<int> allowed_exit_codes;
 		//! Value of the ignore_sigpipe setting when the pipe was opened.
 		bool ignore_sigpipe;
+		//! The client that opened the pipe, used to notice an interrupted query and for logging.
+		weak_ptr<ClientContext> context;
 
 		bool IsOpen() const
 		{
@@ -322,12 +362,127 @@ namespace duckdb
 #endif
 		}
 
+		bool InterruptRequested() const
+		{
+			auto client = context.lock();
+			return client && client->IsInterrupted();
+		}
+
+		void LogWarning(const string &message)
+		{
+			try
+			{
+				auto client = context.lock();
+				if (client)
+				{
+					DUCKDB_LOG_WARNING(*client, "shellfs: " + message);
+				}
+			}
+			catch (...)
+			{
+			}
+		}
+
+#ifndef _WIN32
+		enum class WaitResult
+		{
+			EXITED,
+			TIMED_OUT,
+			INTERRUPTED
+		};
+
+		//! Waits for the command to exit without blocking indefinitely in waitpid(): gives up after timeout_ms
+		//! (when not negative) or, with check_interrupt, as soon as the query is interrupted.
+		WaitResult WaitForChild(int &status, int64_t timeout_ms, bool check_interrupt)
+		{
+			const auto start = std::chrono::steady_clock::now();
+			int64_t sleep_us = 50;
+			while (true)
+			{
+				pid_t wait_result = waitpid(child_pid, &status, WNOHANG);
+				if (wait_result == child_pid)
+				{
+					return WaitResult::EXITED;
+				}
+				if (wait_result == -1)
+				{
+					if (errno == EINTR)
+					{
+						continue;
+					}
+					throw IOException({{"errno", std::to_string(errno)}}, "Could not close pipe \"%s\": %s", path,
+														strerror(errno));
+				}
+				if (check_interrupt && InterruptRequested())
+				{
+					return WaitResult::INTERRUPTED;
+				}
+				if (timeout_ms >= 0)
+				{
+					auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+														 std::chrono::steady_clock::now() - start)
+														 .count();
+					if (elapsed >= timeout_ms)
+					{
+						return WaitResult::TIMED_OUT;
+					}
+				}
+				std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
+				sleep_us = MinValue<int64_t>(sleep_us * 2, 20000);
+			}
+		}
+
+		//! Terminates the command (SIGTERM, then SIGKILL if it does not exit in time) and reaps it.
+		void TerminateChild()
+		{
+			int status;
+			kill(child_pid, SIGTERM);
+			try
+			{
+				if (WaitForChild(status, TERMINATE_GRACE_MS, false) == WaitResult::EXITED)
+				{
+					return;
+				}
+			}
+			catch (...)
+			{
+				return;
+			}
+			kill(child_pid, SIGKILL);
+			pid_t wait_result;
+			do
+			{
+				wait_result = waitpid(child_pid, &status, 0);
+			} while (wait_result == -1 && errno == EINTR);
+		}
+#endif
+
 	public:
-		void Close() override
+		//! Closes the pipe and terminates the command because the query was interrupted.
+		void Abort()
+		{
+#ifndef _WIN32
+			if (IsOpen())
+			{
+				close(fd);
+				fd = -1;
+				TerminateChild();
+			}
+#endif
+		}
+
+		//! Closes the pipe and waits for the command to exit. Returns a description of a failure of the
+		//! command (non-zero exit status, signal), or an empty string. Throws InterruptException if the query
+		//! was interrupted while waiting (the command is then terminated).
+		//!
+		//! DuckDB closes a pipe it read to the end, or wrote everything to, explicitly. A pipe that is still open
+		//! when the handle is destroyed (from_destructor) was abandoned: DuckDB stopped reading early (e.g. a
+		//! LIMIT) or the query writing to it failed or was interrupted.
+		string Finish(bool from_destructor = false)
 		{
 			if (!IsOpen())
 			{
-				return;
+				return string();
 			}
 
 #ifndef _WIN32
@@ -335,34 +490,38 @@ namespace duckdb
 			// Indicate that the pipe has been closed.
 			fd = -1;
 
-			int result;
-			pid_t wait_result;
-			do
+			int result = 0;
+			if (from_destructor || (!for_writing && !reached_eof))
 			{
-				wait_result = waitpid(child_pid, &result, 0);
-			} while (wait_result == -1 && errno == EINTR);
+				// The pipe was abandoned. A command that is still writing to it now exits with SIGPIPE, one that
+				// reads from it sees the end of its input; one that does not exit soon is terminated. Either way
+				// the command stopped because DuckDB no longer uses it, which is not an error.
+				if (WaitForChild(result, EARLY_CLOSE_GRACE_MS, false) != WaitResult::EXITED)
+				{
+					TerminateChild();
+				}
+				return string();
+			}
 
-			if (wait_result == -1)
+			if (WaitForChild(result, -1, true) == WaitResult::INTERRUPTED)
 			{
-				throw IOException({{"errno", std::to_string(errno)}}, "Could not close pipe \"%s\": %s", path,
-													strerror(errno));
+				TerminateChild();
+				throw InterruptException();
 			}
 			if (WIFEXITED(result))
 			{
 				int exit_status = WEXITSTATUS(result);
 				if (allowed_exit_codes.find(exit_status) == allowed_exit_codes.end())
 				{
-					throw IOException("Pipe process exited abnormally code=%d: %s", exit_status, path);
+					return StringUtil::Format("Pipe process exited abnormally code=%d: %s", exit_status, path);
 				}
 			}
 			else if (WIFSIGNALED(result))
 			{
 				int signal_number = WTERMSIG(result);
-				// With ignore_sigpipe a command that stopped because DuckDB closed the pipe before reading
-				// all of its output (e.g. a LIMIT) is not an error.
 				if (!(ignore_sigpipe && signal_number == SIGPIPE))
 				{
-					throw IOException("Pipe process exited with signal signal=%d: %s", signal_number, path);
+					return StringUtil::Format("Pipe process exited with signal signal=%d: %s", signal_number, path);
 				}
 			}
 #else
@@ -375,12 +534,27 @@ namespace duckdb
 				throw IOException({{"errno", std::to_string(errno)}}, "Could not close pipe \"%s\": %s", path,
 													strerror(errno));
 			}
+			if (from_destructor || (!for_writing && !reached_eof))
+			{
+				// The pipe was abandoned: see the POSIX implementation above.
+				return string();
+			}
 			// On Windows, _pclose() returns the exit status directly
 			if (allowed_exit_codes.find(result) == allowed_exit_codes.end())
 			{
-				throw IOException("Pipe process exited abnormally code=%d: %s", result, path);
+				return StringUtil::Format("Pipe process exited abnormally code=%d: %s", result, path);
 			}
 #endif
+			return string();
+		}
+
+		void Close() override
+		{
+			auto error = Finish();
+			if (!error.empty())
+			{
+				throw IOException(error);
+			}
 		};
 	};
 
@@ -402,10 +576,31 @@ namespace duckdb
 		// Fill the buffer like fread() did: DuckDB treats a short read as the end of the stream.
 		while (bytes_read < nr_bytes)
 		{
+			// Wait for data with a timeout so that a command that produces no output does not block an
+			// interrupted query forever.
+			struct pollfd poll_fd;
+			poll_fd.fd = shell_handle.fd;
+			poll_fd.events = POLLIN;
+			poll_fd.revents = 0;
+			int poll_result = poll(&poll_fd, 1, PIPE_POLL_INTERVAL_MS);
+			if (poll_result == -1 && errno != EINTR)
+			{
+				throw IOException({{"errno", std::to_string(errno)}}, "Could not read from pipe \"%s\": %s",
+													handle.path, strerror(errno));
+			}
+			if (poll_result <= 0)
+			{
+				if (shell_handle.InterruptRequested())
+				{
+					shell_handle.Abort();
+					throw InterruptException();
+				}
+				continue;
+			}
 			auto result = read(shell_handle.fd, data_ptr_cast(buffer) + bytes_read, nr_bytes - bytes_read);
 			if (result == -1)
 			{
-				if (errno == EINTR)
+				if (errno == EINTR || errno == EAGAIN)
 				{
 					continue;
 				}
@@ -414,6 +609,7 @@ namespace duckdb
 			}
 			if (result == 0)
 			{
+				shell_handle.reached_eof = true;
 				break;
 			}
 			bytes_read += result;
@@ -425,12 +621,15 @@ namespace duckdb
 			throw IOException({{"errno", std::to_string(errno)}}, "Could not read from pipe \"%s\": %s", handle.path,
 												strerror(errno));
 		}
-#endif
-		if (bytes_read == 0)
+		if (bytes_read < nr_bytes)
 		{
-			// Since the last read() returned 0 bytes, presume that EOF has been encountered, and rather than
-			// having the close, by doing this if there are errors with the pipe they are caught in the query
-			// rather than in the destructor.
+			shell_handle.reached_eof = true;
+		}
+#endif
+		if (shell_handle.reached_eof)
+		{
+			// The end of the output was reached: wait for the command now, so that a failure (non-zero exit
+			// status) is reported by the query rather than lost in the destructor.
 			handle.Close();
 		}
 		return bytes_read;
@@ -440,6 +639,10 @@ namespace duckdb
 	{
 		auto &shell_handle = handle.Cast<ShellFileHandle>();
 		const int64_t requested_bytes = nr_bytes;
+		if (!shell_handle.IsOpen())
+		{
+			throw IOException("Could not write to pipe \"%s\": the pipe is closed", handle.path);
+		}
 
 #ifndef _WIN32
 		if (shell_handle.output_closed)
@@ -451,9 +654,30 @@ namespace duckdb
 		SigpipeGuard sigpipe_guard;
 		while (nr_bytes > 0)
 		{
+			// Wait until the command can take more input with a timeout, so that a command that stopped
+			// reading its input does not block an interrupted query forever.
+			struct pollfd poll_fd;
+			poll_fd.fd = shell_handle.fd;
+			poll_fd.events = POLLOUT;
+			poll_fd.revents = 0;
+			int poll_result = poll(&poll_fd, 1, PIPE_POLL_INTERVAL_MS);
+			if (poll_result == -1 && errno != EINTR)
+			{
+				throw IOException({{"errno", std::to_string(errno)}}, "Could not write to pipe \"%s\": %s", handle.path,
+													strerror(errno));
+			}
+			if (poll_result <= 0)
+			{
+				if (shell_handle.InterruptRequested())
+				{
+					shell_handle.Abort();
+					throw InterruptException();
+				}
+				continue;
+			}
 			auto bytes_to_write = MinValue<idx_t>(idx_t(NumericLimits<int32_t>::Maximum()), idx_t(nr_bytes));
 			auto current_bytes_written = write(shell_handle.fd, buffer, bytes_to_write);
-			if (current_bytes_written == -1 && errno == EINTR)
+			if (current_bytes_written == -1 && (errno == EINTR || errno == EAGAIN))
 			{
 				continue;
 			}
@@ -519,14 +743,64 @@ namespace duckdb
 	unique_ptr<FileHandle> ShellFileSystem::OpenFile(const string &path, FileOpenFlags flags,
 																									 optional_ptr<FileOpener> opener)
 	{
+		// Running a shell command is external access by definition. DuckDB's own check of the path against
+		// allowed_directories / allowed_paths is a string prefix match, which a command such as
+		// '/allowed/dir/x; other-command |' would pass, so refuse every command here.
+		auto &config = DBConfig::GetConfig(db);
+		if (!Settings::Get<EnableExternalAccessSetting>(config))
+		{
+			throw PermissionException("Cannot run shell command \"%s\": shellfs commands are disabled because "
+																"enable_external_access is false",
+																path);
+		}
 		Value value;
+		bool enabled = true;
+		if (FileOpener::TryGetCurrentSetting(opener, "shellfs_enabled", value) ||
+				config.TryGetCurrentSetting("shellfs_enabled", value))
+		{
+			enabled = value.IsNull() || value.GetValue<bool>();
+		}
+		if (!enabled)
+		{
+			throw PermissionException("Cannot run shell command \"%s\": shellfs commands are disabled because "
+																"shellfs_enabled is false",
+																path);
+		}
+
 		bool ignore_sigpipe = false;
 		if (FileOpener::TryGetCurrentSetting(opener, "ignore_sigpipe", value))
 		{
-			ignore_sigpipe = value.GetValue<bool>();
+			ignore_sigpipe = !value.IsNull() && value.GetValue<bool>();
 		}
 
 		const bool for_writing = path.front() == '|';
+		if (for_writing && flags.OpenForReading())
+		{
+			throw IOException("Cannot read from \"%s\": a path that starts with '|' is a command that DuckDB writes "
+												"to. To read the output of a command, end the path with '|', e.g. 'seq 10 |'",
+												path);
+		}
+		if (!for_writing && flags.OpenForWriting())
+		{
+			throw IOException("Cannot write to \"%s\": a path that ends with '|' is a command that DuckDB reads "
+												"from. To write to a command, start the path with '|', e.g. '| cat > out.csv'",
+												path);
+		}
+
+		weak_ptr<ClientContext> client;
+		auto client_context = FileOpener::TryGetClientContext(opener);
+		if (client_context)
+		{
+			try
+			{
+				client = client_context->shared_from_this();
+			}
+			catch (const std::bad_weak_ptr &)
+			{
+				// Not owned by a shared_ptr: interrupts cannot be noticed while waiting for the command.
+			}
+		}
+
 		string command;
 		std::unordered_set<int> allowed_exit_codes;
 		if (for_writing)
@@ -551,8 +825,8 @@ namespace duckdb
 			throw IOException({{"errno", std::to_string(errno)}}, "Could not open pipe for %s \"%s\": %s",
 												for_writing ? "writing" : "reading", path, strerror(errno));
 		}
-		return make_uniq<ShellFileHandle>(*this, path, fd, child_pid, flags, std::move(allowed_exit_codes),
-																			ignore_sigpipe);
+		return make_uniq<ShellFileHandle>(*this, path, fd, child_pid, flags, for_writing, std::move(allowed_exit_codes),
+																			ignore_sigpipe, std::move(client));
 #else
 		// Binary mode: in the default text mode the CRT translates "\n" to "\r\n" when writing (and back,
 		// and stops at Ctrl-Z, when reading), which corrupts binary data such as Parquet files.
@@ -562,7 +836,8 @@ namespace duckdb
 			throw IOException({{"errno", std::to_string(errno)}}, "Could not open pipe for %s \"%s\": %s",
 												for_writing ? "writing" : "reading", path, strerror(errno));
 		}
-		return make_uniq<ShellFileHandle>(*this, path, pipe, flags, std::move(allowed_exit_codes), ignore_sigpipe);
+		return make_uniq<ShellFileHandle>(*this, path, pipe, flags, for_writing, std::move(allowed_exit_codes),
+																			ignore_sigpipe, std::move(client));
 #endif
 	}
 

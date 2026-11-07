@@ -1,0 +1,49 @@
+# name: test/sql/shellfs_close.test
+# description: commands whose output is not read to the end are stopped, and failures are reported
+# group: [shellfs]
+
+require shellfs
+
+# The commands in this file use POSIX shell syntax (trap, ';', loops) and POSIX signals.
+require notwindows
+
+# An infinite producer: DuckDB stops reading after LIMIT 1 and the command exits with SIGPIPE
+query I
+SELECT * FROM read_csv('yes |', header = false) LIMIT 1;
+----
+y
+
+# A command that keeps running after its output is no longer read is terminated (SIGTERM)
+query I
+SELECT * FROM read_csv('yes; sleep 30 |', header = false) LIMIT 1;
+----
+y
+
+# ... and one that ignores SIGTERM is killed (SIGKILL)
+query I
+SELECT * FROM read_csv('trap "" TERM; yes; sleep 30 |', header = false) LIMIT 1;
+----
+y
+
+# A non-zero exit status after a lot of output is still reported by the query
+statement error
+SELECT count(*) FROM read_csv('seq 1 200000; exit 5 |', header = false);
+----
+Pipe process exited abnormally code=5
+
+query I
+SELECT count(*) FROM read_csv('seq 1 200000; exit 5 {allowed_exit_codes=5}|', header = false);
+----
+200000
+
+# A command that fails without output
+statement error
+SELECT * FROM read_csv('exit 7 |', header = false);
+----
+code=7
+
+# Reading from a command that DuckDB writes to is an error
+statement error
+SELECT * FROM read_csv('| cat');
+----
+a path that starts with '|' is a command that DuckDB writes to

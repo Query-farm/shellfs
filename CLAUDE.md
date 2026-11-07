@@ -50,7 +50,7 @@ When making changes the version should always be updated to the current date plu
 
 The extension registers a custom filesystem (`ShellFileSystem`) with DuckDB:
 
-- **`src/shellfs_extension.cpp`**: Extension entry point. Registers `ShellFileSystem` and the `ignore_sigpipe` config option.
+- **`src/shellfs_extension.cpp`**: Extension entry point. Registers `ShellFileSystem` and the `ignore_sigpipe` and `shellfs_enabled` config options.
 - **`src/shell_file_system.cpp`**: Core implementation. `ShellFileSystem` handles pipe detection (paths starting or ending with `|`) and spawns `/bin/sh -c <command>` with `posix_spawn()` (child gets default SIGPIPE disposition) on POSIX, `_popen()` on Windows. `ShellFileHandle` manages pipe lifecycle and exit code validation.
 - **`src/include/shell_file_system.hpp`**: Header defining `ShellFileSystem` class.
 
@@ -58,7 +58,12 @@ Key behavior:
 - Paths ending with `|` are read pipes; paths starting with `|` are write pipes
 - Exit code specification via `{allowed_exit_codes=N,M}|` suffix allows non-zero exits (useful for `grep`)
 - Writes block SIGPIPE in the writing thread, so a command that exits early yields EPIPE (an error) instead of killing the process
-- `ignore_sigpipe` setting treats a pipe closed early as success: remaining output to a write pipe is discarded, and a read-pipe command terminated by SIGPIPE (DuckDB stopped reading, e.g. LIMIT) is not an error
+- `ignore_sigpipe` setting treats a pipe closed early as success: remaining output to a write pipe is discarded
+- No command runs when `enable_external_access` is false (DuckDB's `allowed_directories` check is a prefix match, so it cannot be relied on for commands), or when the one-way `shellfs_enabled` setting is false
+- Opening a read pipe (`cmd |`) for writing, or a write pipe (`| cmd`) for reading, is an error
+- DuckDB's end of the pipe is non-blocking; Read/Write/Close wait with poll()/WNOHANG and check `ClientContext::IsInterrupted()`, terminating the command (SIGTERM, then SIGKILL) when the query is interrupted
+- A pipe still open when the handle is destroyed was abandoned (LIMIT stopped reading, or a COPY failed): the command gets a 1 s grace period, then is terminated; its exit status is not an error. Reaching EOF closes the pipe at once so exit-status errors surface in the query. Destructor-time errors go to DuckDB's logger
+- The extension version lives in `SHELLFS_EXTENSION_VERSION` (`src/include/shellfs_extension.hpp`), used by `Version()` and telemetry
 
 ## Test Structure
 

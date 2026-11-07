@@ -1,0 +1,72 @@
+# name: test/sql/shellfs_security.test
+# description: shellfs refuses to run commands when external access or shellfs_enabled is turned off
+# group: [shellfs]
+
+require shellfs
+
+# The settings are documented
+query TT
+SELECT name, description != '' FROM duckdb_settings() WHERE name IN ('ignore_sigpipe', 'shellfs_enabled') ORDER BY name;
+----
+ignore_sigpipe	true
+shellfs_enabled	true
+
+# A path ending in '|' is a command DuckDB reads from: writing to it is an error, not a reader
+statement error
+COPY (SELECT 1 AS a) TO 'echo 1 |' (FORMAT csv);
+----
+a path that ends with '|' is a command that DuckDB reads from
+
+# shellfs_enabled = false turns shellfs off for the session
+statement ok con1
+SET shellfs_enabled = false;
+
+statement error con1
+SELECT * FROM read_csv('echo 1 |');
+----
+shellfs_enabled is false
+
+statement error con1
+COPY (SELECT 1 AS a) TO '| cat' (FORMAT csv);
+----
+shellfs_enabled is false
+
+# ... and it cannot be turned back on
+statement error con1
+SET shellfs_enabled = true;
+----
+cannot be set back to true
+
+statement error con1
+RESET shellfs_enabled;
+----
+cannot be set back to true
+
+statement error con1
+SELECT * FROM read_csv('echo 1 |');
+----
+shellfs_enabled is false
+
+# Setting it to false again is allowed
+statement ok con1
+SET shellfs_enabled = false;
+
+# Other connections are not affected
+query I
+SELECT * FROM read_csv('echo 1 |', header = false);
+----
+1
+
+# With external access disabled no command runs (see also shellfs_external_access.test)
+statement ok
+SET enable_external_access = false;
+
+statement error
+SELECT * FROM read_csv('echo 1 |');
+----
+Permission Error
+
+statement error
+COPY (SELECT 1 AS a) TO '| cat' (FORMAT csv);
+----
+Permission Error

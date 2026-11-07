@@ -1,0 +1,26 @@
+# name: test/sql/shellfs_external_access.test
+# description: no shell command runs when enable_external_access is false, even inside allowed_directories
+# group: [shellfs]
+
+require shellfs
+
+# POSIX paths and shell syntax
+require notwindows
+
+statement ok
+SET allowed_directories = ['/tmp/'];
+
+statement ok
+SET enable_external_access = false;
+
+# DuckDB's allowed_directories check is a prefix match on the path, which this command passes;
+# shellfs itself refuses to run it.
+statement error
+SELECT * FROM read_csv('/tmp/x; echo 1 |', header = false);
+----
+shellfs commands are disabled because enable_external_access is false
+
+statement error
+SELECT * FROM read_csv('/tmp/ {allowed_exit_codes=0,127}|', header = false);
+----
+shellfs commands are disabled because enable_external_access is false
